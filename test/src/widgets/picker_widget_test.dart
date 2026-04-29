@@ -22,6 +22,7 @@ void main() {
                 activeBuilder: (_) => const SizedBox(),
                 inactiveBuilder: (_) => const SizedBox(),
                 wheelOption: const DateTimePickerWheelOption(),
+                isProgrammaticScroll: ValueNotifier(false),
               ),
             ),
           ),
