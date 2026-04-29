@@ -539,51 +539,55 @@ class _ScrollDateTimePickerState extends State<ScrollDateTimePicker> {
   // ---------------------------------------------------------------------------
 
   Future<void> _onChange(DateTimeType type, int rowIndex) async {
-  if (!mounted) return;
+    if (!mounted) return;
 
-  /* 1. Calculate new date based on rowIndex */
-  var newDate = _helper.getDateFromRowIndex(
-    type: type,
-    rowIndex: rowIndex,
-    activeDate: _activeDate,
-  );
+    /* 1. Calculate new date based on rowIndex */
+    var newDate = _helper.getDateFromRowIndex(
+      type: type,
+      rowIndex: rowIndex,
+      activeDate: _activeDate,
+    );
 
-  /* 2. If date out of range, revert — but for year: clamp statt revert */
-  if (widget.markOutOfRangeDateInvalid) {
-    if (_isDateOutOfRange(newDate)) {
-      if (type == DateTimeType.year) {
-        // Das Jahr selbst ist gültig, aber der aktuelle Monat/Tag/Zeit passt
-        // noch nicht. Auf minDate/maxDate clampen — _recheckPosition snappt
-        // danach Monat/Tag auf gültige Werte.
-        if (newDate.isBefore(_option.minDate)) {
-          newDate = _option.minDate;
+    /* 2. If date out of range, handle based on column type.
+     *
+     * For year: clamp to minDate/maxDate instead of reverting.
+     * Rationale: the user selected a valid year (it exists in the years list),
+     * but the current month/day/time in that year may fall outside [min, max].
+     * Clamping lets the year selection stick; _recheckPosition (step 5) will
+     * then snap month/day to the nearest valid values automatically.
+     *
+     * For all other columns: revert to _activeDate as before.
+     */
+    if (widget.markOutOfRangeDateInvalid) {
+      if (_isDateOutOfRange(newDate)) {
+        if (type == DateTimeType.year) {
+          newDate = newDate.isBefore(_option.minDate)
+              ? _option.minDate
+              : _option.maxDate;
         } else {
-          newDate = _option.maxDate;
+          newDate = _activeDate;
         }
-      } else {
-        newDate = _activeDate;
       }
     }
-  }
 
-  /* 3. Refresh widget state if date changed */
-  if (newDate != _activeDate && mounted) {
-    setState(() => _activeDate = newDate);
-  }
+    /* 3. Refresh widget state if date changed */
+    if (newDate != _activeDate && mounted) {
+      setState(() => _activeDate = newDate);
+    }
 
-  /* 4. Trigger onChange callback with latest date */
-  widget.onChange?.call(newDate);
+    /* 4. Trigger onChange callback with latest date */
+    widget.onChange?.call(newDate);
 
-  /* 5. Recheck scroll positions */
-  if (!_isRecheckingPosition.value) {
-    _isRecheckingPosition.value = true;
-    await _recheckPosition(DateTimeType.year, newDate);
-    await _recheckPosition(DateTimeType.month, newDate);
-    await _recheckPosition(DateTimeType.day, newDate);
-    await _recheckPosition(DateTimeType.weekday, newDate);
-    if (mounted) _isRecheckingPosition.value = false;
+    /* 5. Recheck scroll positions — snap any dependent column back into place */
+    if (!_isRecheckingPosition.value) {
+      _isRecheckingPosition.value = true;
+      await _recheckPosition(DateTimeType.year, newDate);
+      await _recheckPosition(DateTimeType.month, newDate);
+      await _recheckPosition(DateTimeType.day, newDate);
+      await _recheckPosition(DateTimeType.weekday, newDate);
+      if (mounted) _isRecheckingPosition.value = false;
+    }
   }
-}
 
   // ---------------------------------------------------------------------------
   // Position recheck

@@ -215,16 +215,27 @@ class DateTimePickerHelper {
   }
 
   bool isTextDisabled(DateTimeType type, DateTime activeDate, int rowIndex) {
+    // Check if day is valid
     if (type == DateTimeType.day) {
-      final newMaxDay = maxDay(activeDate.month, activeDate.year);
+      final newMaxDay = maxDay(
+        activeDate.month,
+        activeDate.year,
+      );
       final day = rowIndex % itemCount(type) + 1;
       if (day > newMaxDay) return true;
     }
 
-    // FIX: Für Jahr nur prüfen ob das Jahr selbst im erlaubten Bereich liegt.
-    // activeDate.copyWith(year: x) ergibt ein Datum mit aktuellem Monat/Tag/Zeit
-    // in Jahr x — das kann vor minDate liegen, obwohl gültige Daten in dem Jahr
-    // existieren (z.B. activeDate = April, minDate = Juli desselben Jahres).
+    // FIX: For year, only check whether the year itself is within the allowed
+    // range — not whether activeDate.copyWith(year: x) is in range.
+    //
+    // The naive approach constructs a date by keeping the current month/day/time
+    // and swapping the year. If the active date is e.g. April 29 and minDate is
+    // July 22 of the same year, the candidate "April 29 in minYear" falls before
+    // minDate, so the entire year is incorrectly marked as disabled — even though
+    // valid dates exist later in that year (July–December).
+    //
+    // Since `years` is already bounded to [minDate.year, maxDate.year], every
+    // entry in it is by definition a year that contains at least one valid date.
     if (type == DateTimeType.year) {
       final year = years[rowIndex % itemCount(type)];
       return year < option.minDate.year || year > option.maxDate.year;
