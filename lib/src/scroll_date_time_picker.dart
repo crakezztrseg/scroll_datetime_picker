@@ -163,6 +163,20 @@ class _ScrollDateTimePickerState extends State<ScrollDateTimePicker> {
 
   late final ValueNotifier<bool> _isRecheckingPosition;
 
+  // ── FIX Bug 2: explicit programmatic-scroll flag ────────────────────────────
+  // Shared with all PickerWidget columns.  Set to true before any programmatic
+  // animateTo (_fixPosition, _driveDatePosition) and false after it completes.
+  // PickerWidget reads this flag in _onNotification to decide whether a
+  // ScrollEndNotification originated from user input (→ call onChange) or from
+  // one of our own corrections (→ ignore).
+  //
+  // This replaces the fragile ScrollTypeListener approach, which relied on
+  // UserScrollNotification being present in the scroll sequence.  Short
+  // programmatic animations often emit no ScrollUpdateNotification at all,
+  // leaving the listener's flag stale and causing phantom onChange calls.
+  final ValueNotifier<bool> _programmaticScrollActive =
+      ValueNotifier<bool>(false);
+
   @override
   void initState() {
     super.initState();
@@ -241,6 +255,7 @@ class _ScrollDateTimePickerState extends State<ScrollDateTimePicker> {
   @override
   void dispose() {
     _isRecheckingPosition.dispose();
+    _programmaticScrollActive.dispose();
 
     for (final ctrl in _controllers) {
       ctrl.dispose();
@@ -310,7 +325,7 @@ class _ScrollDateTimePickerState extends State<ScrollDateTimePicker> {
               ),
             ),
 
-            /* Picker Widget */
+            /* Picker columns */
             SizedBox(
               width: constraints.maxWidth,
               height: widget.itemExtent * widget.visibleItem,
@@ -344,9 +359,14 @@ class _ScrollDateTimePickerState extends State<ScrollDateTimePicker> {
                               itemExtent: widget.itemExtent,
                               infiniteScroll: widget.infiniteScroll,
                               controller: _controllers[colIndex],
-                              onChange: (rowIndex) => _onChange(type, rowIndex),
+                              onChange: (rowIndex) =>
+                                  _onChange(type, rowIndex),
                               itemCount: _helper.itemCount(type),
                               wheelOption: widget.wheelOption,
+                              // Pass the shared flag so PickerWidget can
+                              // distinguish user scrolls from our programmatic
+                              // corrections (_fixPosition / _driveDatePosition).
+                              isProgrammaticScroll: _programmaticScrollActive,
                               inactiveBuilder: (rowIndex) {
                                 final text =
                                     _helper.getText(type, pattern, rowIndex);
@@ -422,6 +442,10 @@ class _ScrollDateTimePickerState extends State<ScrollDateTimePicker> {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // Programmatic positioning (controller / init)
+  // ---------------------------------------------------------------------------
+
   Future<void> _driveDatePosition(
     DateTime targetDate, {
     bool force = false,
@@ -435,63 +459,84 @@ class _ScrollDateTimePickerState extends State<ScrollDateTimePicker> {
     /* 3. Ensure the active date is updated before driving the scroll position */
     if (mounted) setState(() => _activeDate = targetDate);
 
-    /* 4. Start drive date position */
-    for (var i = 0; i < _option.dateTimeTypes.length; i++) {
-      late double extent;
+    // ── FIX Bug 2: mark all animations as programmatic ─────────────────────
+    // Without this, the ScrollEndNotification emitted by each animateTo below
+    // would reach PickerWidget._onNotification, which would call onChange and
+    // set _activeDate to whatever the wheel happened to land on — potentially
+    // wrong if the physics hadn't finished snapping.
+    _programmaticScrollActive.value = true;
+    try {
+      /* 4. Start drive date position */
+      for (var i = 0; i < _option.dateTimeTypes.length; i++) {
+        late double extent;
 
-      switch (_option.dateTimeTypes[i]) {
-        case DateTimeType.year:
-          extent = _helper.years.indexOf(targetDate.year).toDouble();
-          break;
-        case DateTimeType.month:
-          extent = targetDate.month - 1;
-          break;
-        case DateTimeType.day:
-          extent = targetDate.day - 1;
-          break;
-        case DateTimeType.weekday:
-          extent = targetDate.weekday - 1;
-          break;
-        case DateTimeType.hour24:
-          extent = targetDate.hour.toDouble();
-          break;
-        case DateTimeType.hour12:
-          extent = _helper.convertToHour12(targetDate.hour) - 1;
-          break;
-        case DateTimeType.minute:
-          extent = targetDate.minute.toDouble();
-          break;
-        case DateTimeType.second:
-          extent = targetDate.second.toDouble();
-          break;
-        case DateTimeType.amPM:
-          extent = _helper.isAM(targetDate.hour) ? 0 : 1;
-          break;
+        switch (_option.dateTimeTypes[i]) {
+          case DateTimeType.year:
+            extent = _helper.years.indexOf(targetDate.year).toDouble();
+            break;
+          case DateTimeType.month:
+            extent = targetDate.month - 1;
+            break;
+          case DateTimeType.day:
+            extent = targetDate.day - 1;
+            break;
+          case DateTimeType.weekday:
+            extent = targetDate.weekday - 1;
+            break;
+          case DateTimeType.hour24:
+            extent = targetDate.hour.toDouble();
+            break;
+          case DateTimeType.hour12:
+            extent = _helper.convertToHour12(targetDate.hour) - 1;
+            break;
+          case DateTimeType.minute:
+            extent = targetDate.minute.toDouble();
+            break;
+          case DateTimeType.second:
+            extent = targetDate.second.toDouble();
+            break;
+          case DateTimeType.amPM:
+            extent = _helper.isAM(targetDate.hour) ? 0 : 1;
+            break;
+        }
+
+        /* 4.1. If controller doesn't attached to any client, skip */
+        if (!_controllers[i].hasClients) continue;
+
+        /* 4.2. Fire animations in parallel (unawaited), yield between each */
+        unawaited(
+          _controllers[i].animateTo(
+            widget.itemExtent * extent,
+            duration: const Duration(milliseconds: 500),
+            curve: Curves.easeOut,
+          ),
+        );
+
+        /* 4.3. Yield to let each animation register before starting the next */
+        await Future.microtask(() => null);
       }
 
-      /* 4.1. If controller doesn't attached to any client, return */
-      if (!_controllers[i].hasClients) continue;
-
-      /* 4.2. Animate to position */
-      unawaited(
-        _controllers[i].animateTo(
-          widget.itemExtent * extent,
-          duration: const Duration(milliseconds: 500),
-          curve: Curves.easeOut,
-        ),
-      );
-
-      /* 4.3. Await to prevent race conditions */
-      await Future.microtask(() => null);
+      // Wait for all 500 ms animations to finish before releasing the flag.
+      // Using a small buffer (550 ms) to account for frame scheduling.
+      await Future.delayed(const Duration(milliseconds: 550));
+    } finally {
+      if (mounted) _programmaticScrollActive.value = false;
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Range helpers
+  // ---------------------------------------------------------------------------
 
   bool _isDateOutOfRange(DateTime date) {
     if (date.isAfter(_option.maxDate)) return true;
     if (date.isBefore(_option.minDate)) return true;
-
     return false;
   }
+
+  // ---------------------------------------------------------------------------
+  // User-interaction change handler
+  // ---------------------------------------------------------------------------
 
   Future<void> _onChange(DateTimeType type, int rowIndex) async {
     if (!mounted) return;
@@ -503,7 +548,7 @@ class _ScrollDateTimePickerState extends State<ScrollDateTimePicker> {
       activeDate: _activeDate,
     );
 
-    /* 2. If date out of range, change target date to be existing date */
+    /* 2. If date out of range, revert to existing date */
     if (widget.markOutOfRangeDateInvalid) {
       if (_isDateOutOfRange(newDate)) newDate = _activeDate;
     }
@@ -516,7 +561,7 @@ class _ScrollDateTimePickerState extends State<ScrollDateTimePicker> {
     /* 4. Trigger onChange callback with latest date */
     widget.onChange?.call(newDate);
 
-    /* 4. Recheck scroll positions, should be stopped at correct position */
+    /* 5. Recheck scroll positions — snap any dependent column back into place */
     if (!_isRecheckingPosition.value) {
       _isRecheckingPosition.value = true;
       await _recheckPosition(DateTimeType.year, newDate);
@@ -525,40 +570,58 @@ class _ScrollDateTimePickerState extends State<ScrollDateTimePicker> {
       await _recheckPosition(DateTimeType.weekday, newDate);
       if (mounted) _isRecheckingPosition.value = false;
     }
-
-    return;
   }
+
+  // ---------------------------------------------------------------------------
+  // Position recheck
+  // ---------------------------------------------------------------------------
 
   Future<void> _recheckPosition(DateTimeType type, DateTime date) async {
     final index = _option.dateTimeTypes.indexOf(type);
-    if (index != -1) {
-      late int targetPosition;
+    if (index == -1) return;
 
-      switch (type) {
-        case DateTimeType.year:
-          targetPosition = _helper.years.indexOf(date.year) + 1;
-          break;
-        case DateTimeType.month:
-          targetPosition = date.month;
-          break;
-        case DateTimeType.day:
-          targetPosition = date.day;
-          break;
-        case DateTimeType.weekday:
-          targetPosition = date.weekday;
-          break;
-        default:
-          break;
-      }
+    late int targetPosition;
 
-      /* Check if other scroll controller is still scrolling */
-      await _fixPosition(
-        controller: _controllers[index],
-        itemCount: _helper.itemCount(type),
-        targetPosition: targetPosition,
-      );
+    switch (type) {
+      case DateTimeType.year:
+        // ── FIX Bug 4: guard against indexOf returning -1 ────────────────────
+        // If _activeDate.year is somehow outside the years list (e.g. pushed
+        // there by a cascaded weekday arithmetic bug), indexOf returns -1 and
+        // targetPosition would be 0.  The subsequent _fixPosition call would
+        // then compute a negative endOffset, scrolling the year wheel to 0
+        // (minDate.year) while _activeDate.year still held the out-of-range
+        // value — creating a permanent visual / state mismatch.
+        final yearIdx = _helper.years.indexOf(date.year);
+        if (yearIdx == -1) return; // year is outside the allowed range; skip
+        targetPosition = yearIdx + 1;
+        break;
+
+      case DateTimeType.month:
+        targetPosition = date.month;
+        break;
+
+      case DateTimeType.day:
+        targetPosition = date.day;
+        break;
+
+      case DateTimeType.weekday:
+        targetPosition = date.weekday;
+        break;
+
+      default:
+        return;
     }
+
+    await _fixPosition(
+      controller: _controllers[index],
+      itemCount: _helper.itemCount(type),
+      targetPosition: targetPosition,
+    );
   }
+
+  // ---------------------------------------------------------------------------
+  // Position correction
+  // ---------------------------------------------------------------------------
 
   Future<void> _fixPosition({
     required ScrollController controller,
@@ -567,32 +630,43 @@ class _ScrollDateTimePickerState extends State<ScrollDateTimePicker> {
   }) async {
     if (!mounted) return;
 
-    /* 1. If doesn't have controller, return */
+    /* 1. If no client, skip */
     if (!controller.hasClients) return;
 
-    /* 2. If existing postition already same with target, return */
+    /* 2. If position already correct, skip */
     final scrollPosition =
         (controller.offset / widget.itemExtent).floor() % itemCount + 1;
     if (targetPosition == scrollPosition) return;
 
-    /* 3. If still scrolling, return */
+    /* 3. If still scrolling from a previous gesture, skip */
     if (controller.position.isScrollingNotifier.value) return;
 
-    /* 4. Calculate the difference */
+    /* 4. Calculate target offset */
     final difference = scrollPosition - targetPosition;
     final endOffset = controller.offset - (difference * widget.itemExtent);
 
-    /* 5. Start fixing position */
-
-    await Future.delayed(
-      const Duration(milliseconds: 100),
-      () => controller.animateTo(
+    // ── FIX Bug 2: mark the correction scroll as programmatic ───────────────
+    // The original code used Future.delayed(100ms, () => animateTo(...)).
+    // That pattern had two problems:
+    //   a) The Future.delayed awaited only the 100 ms delay, not the animation
+    //      itself, so _isRecheckingPosition was cleared before the animation
+    //      finished, allowing new user events to race with the correction.
+    //   b) The animation fired a ScrollEndNotification that ScrollTypeListener
+    //      might misclassify as a user scroll (if no ScrollUpdateNotification
+    //      was emitted for a short travel distance), triggering another onChange.
+    //
+    // The fix: set the shared _programmaticScrollActive flag around the await,
+    // so PickerWidget._onNotification ignores the notification; and properly
+    // await the animation so the caller knows when it has settled.
+    _programmaticScrollActive.value = true;
+    try {
+      await controller.animateTo(
         endOffset,
         duration: const Duration(milliseconds: 500),
         curve: Curves.bounceOut,
-      ),
-    );
-
-    return;
+      );
+    } finally {
+      if (mounted) _programmaticScrollActive.value = false;
+    }
   }
 }
