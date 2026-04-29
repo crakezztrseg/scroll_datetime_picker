@@ -215,24 +215,34 @@ class DateTimePickerHelper {
   }
 
   bool isTextDisabled(DateTimeType type, DateTime activeDate, int rowIndex) {
-    // Check if day is valid
-    if (type == DateTimeType.day) {
-      final newMaxDay = maxDay(
-        activeDate.month,
-        activeDate.year,
-      );
-      final day = rowIndex % itemCount(type) + 1;
-      if (day > newMaxDay) return true;
-    }
-
-    final date = getDateFromRowIndex(
-      type: type,
-      activeDate: activeDate,
-      rowIndex: rowIndex,
+  // Check if day is valid
+  if (type == DateTimeType.day) {
+    final newMaxDay = maxDay(
+      activeDate.month,
+      activeDate.year,
     );
-
-    return date.isAfter(option.maxDate) || date.isBefore(option.minDate);
+    final day = rowIndex % itemCount(type) + 1;
+    if (day > newMaxDay) return true;
   }
+
+  // ✅ FIX: For year, check only whether the year is within the allowed range.
+  // Using activeDate.copyWith(year: x) here is wrong — it produces a date with
+  // the current month/day/time in year x, which may be before minDate even when
+  // valid dates exist later in that year (e.g. activeDate is April but
+  // minDate is July of the same year).
+  if (type == DateTimeType.year) {
+    final year = years[rowIndex % itemCount(type)];
+    return year < option.minDate.year || year > option.maxDate.year;
+  }
+
+  final date = getDateFromRowIndex(
+    type: type,
+    activeDate: activeDate,
+    rowIndex: rowIndex,
+  );
+
+  return date.isAfter(option.maxDate) || date.isBefore(option.minDate);
+}
 
   // ---------------------------------------------------------------------------
   // Layout helpers for prefix widget flex calculations
